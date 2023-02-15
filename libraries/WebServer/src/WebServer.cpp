@@ -33,7 +33,8 @@
 
 
 static const char AUTHORIZATION_HEADER[] = "Authorization";
-static const char qop_auth[] = "qop=\"auth\"";
+static const char qop_auth[] PROGMEM = "qop=auth";
+static const char qop_auth_quoted[] PROGMEM = "qop=\"auth\"";
 static const char WWW_Authenticate[] = "WWW-Authenticate";
 static const char Content_Length[] = "Content-Length";
 
@@ -45,6 +46,7 @@ WebServer::WebServer(IPAddress addr, int port)
 , _currentVersion(0)
 , _currentStatus(HC_NONE)
 , _statusChange(0)
+, _nullDelay(true)
 , _currentHandler(nullptr)
 , _firstHandler(nullptr)
 , _lastHandler(nullptr)
@@ -66,6 +68,7 @@ WebServer::WebServer(int port)
 , _currentVersion(0)
 , _currentStatus(HC_NONE)
 , _statusChange(0)
+, _nullDelay(true)
 , _currentHandler(nullptr)
 , _firstHandler(nullptr)
 , _lastHandler(nullptr)
@@ -183,7 +186,7 @@ bool WebServer::authenticate(const char * username, const char * password){
       }
       // parameters for the RFC 2617 newer Digest
       String _nc,_cnonce;
-      if(authReq.indexOf(FPSTR(qop_auth)) != -1) {
+      if(authReq.indexOf(FPSTR(qop_auth)) != -1 || authReq.indexOf(FPSTR(qop_auth_quoted)) != -1) {
         _nc = _extractParam(authReq, F("nc="), ',');
         _cnonce = _extractParam(authReq, F("cnonce=\""),'\"');
       }
@@ -203,7 +206,7 @@ bool WebServer::authenticate(const char * username, const char * password){
       }
       log_v("Hash of GET:uri=%s", _H2.c_str());
       String _responsecheck = "";
-      if(authReq.indexOf(FPSTR(qop_auth)) != -1) {
+      if(authReq.indexOf(FPSTR(qop_auth)) != -1 || authReq.indexOf(FPSTR(qop_auth_quoted)) != -1) {
           _responsecheck = md5str(_H1 + ':' + _nonce + ':' + _nc + ':' + _cnonce + F(":auth:") + _H2);
       } else {
           _responsecheck = md5str(_H1 + ':' + _nonce + ':' + _H2);
@@ -245,15 +248,15 @@ void WebServer::requestAuthentication(HTTPAuthMethod mode, const char* realm, co
   send(401, String(FPSTR(mimeTable[html].mimeType)), authFailMsg);
 }
 
-void WebServer::on(const String &uri, WebServer::THandlerFunction handler) {
+void WebServer::on(const Uri &uri, WebServer::THandlerFunction handler) {
   on(uri, HTTP_ANY, handler);
 }
 
-void WebServer::on(const String &uri, HTTPMethod method, WebServer::THandlerFunction fn) {
+void WebServer::on(const Uri &uri, HTTPMethod method, WebServer::THandlerFunction fn) {
   on(uri, method, fn, _fileUploadHandler);
 }
 
-void WebServer::on(const String &uri, HTTPMethod method, WebServer::THandlerFunction fn, WebServer::THandlerFunction ufn) {
+void WebServer::on(const Uri &uri, HTTPMethod method, WebServer::THandlerFunction fn, WebServer::THandlerFunction ufn) {
   _addRequestHandler(new FunctionRequestHandler(fn, ufn, uri, method));
 }
 
@@ -280,6 +283,9 @@ void WebServer::handleClient() {
   if (_currentStatus == HC_NONE) {
     WiFiClient client = _server.available();
     if (!client) {
+      if (_nullDelay) {
+        delay(1);
+      }
       return;
     }
 
@@ -308,11 +314,12 @@ void WebServer::handleClient() {
           _contentLength = CONTENT_LENGTH_NOT_SET;
           _handleRequest();
 
-          if (_currentClient.connected()) {
-            _currentStatus = HC_WAIT_CLOSE;
-            _statusChange = millis();
-            keepCurrentClient = true;
-          }
+// Fix for issue with Chrome based browsers: https://github.com/espressif/arduino-esp32/issues/3652
+//           if (_currentClient.connected()) {
+//             _currentStatus = HC_WAIT_CLOSE;
+//             _statusChange = millis();
+//             keepCurrentClient = true;
+//           }
         }
       } else { // !_currentClient.available()
         if (millis() - _statusChange <= HTTP_MAX_DATA_WAIT) {
@@ -370,6 +377,10 @@ void WebServer::setContentLength(const size_t contentLength) {
     _contentLength = contentLength;
 }
 
+void WebServer::enableDelay(boolean value) {
+  _nullDelay = value;
+}
+
 void WebServer::enableCORS(boolean value) {
   _corsEnabled = value;
 }
@@ -402,6 +413,8 @@ void WebServer::_prepareHeader(String& response, int code, const char* content_t
     }
     if (_corsEnabled) {
         sendHeader(String(FPSTR("Access-Control-Allow-Origin")), String("*"));
+	sendHeader(String(FPSTR("Access-Control-Allow-Methods")), String("*"));
+	sendHeader(String(FPSTR("Access-Control-Allow-Headers")), String("*"));
     }
     sendHeader(String(F("Connection")), String(F("close")));
 
@@ -454,20 +467,23 @@ void WebServer::send(int code, const String& content_type, const String& content
 }
 
 void WebServer::sendContent(const String& content) {
+  sendContent(content.c_str(), content.length());
+}
+
+void WebServer::sendContent(const char* content, size_t contentLength) {
   const char * footer = "\r\n";
-  size_t len = content.length();
   if(_chunked) {
     char * chunkSize = (char *)malloc(11);
     if(chunkSize){
-      sprintf(chunkSize, "%x%s", len, footer);
+      sprintf(chunkSize, "%x%s", contentLength, footer);
       _currentClientWrite(chunkSize, strlen(chunkSize));
       free(chunkSize);
     }
   }
-  _currentClientWrite(content.c_str(), len);
+  _currentClientWrite(content, contentLength);
   if(_chunked){
     _currentClient.write(footer, 2);
-    if (len == 0) {
+    if (contentLength == 0) {
       _chunked = false;
     }
   }
